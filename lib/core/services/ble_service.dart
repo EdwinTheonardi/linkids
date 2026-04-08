@@ -37,9 +37,6 @@ class AlarmConfig {
 
   // ── PRR Threshold ─────────────────────────────────────────────────────────
   // Alarm hanya bunyi jika RSSI danger DAN PRR di bawah threshold
-  static const double prrStage1Threshold = 0.80; // PRR ≤ 80% → boleh naik stage 1
-  static const double prrStage2Threshold = 0.60; // PRR ≤ 60% → boleh naik stage 2
-  static const int    prrWindowSize      = 15;   // 15 × 200ms = 3 detik window
 }
 
 // ── UUID ──────────────────────────────────────────────────────────────────────
@@ -52,91 +49,15 @@ class BleUuid {
 // ── Alert Stage ───────────────────────────────────────────────────────────────
 enum AlertStage {
   none,   // Zona safe/caution — tidak ada aksi
-  stage1, // Danger ≥1 detik + PRR terpenuhi → 1x getar ringan di HP
-  stage2, // Danger ≥4 detik + PRR terpenuhi → getar terus + popup + notif + buzzer
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// PRR CALCULATOR
-// Menghitung Packet Reception Rate dari heartbeat notify ESP32 setiap 200ms
-// ═════════════════════════════════════════════════════════════════════════════
-class _PrrCalculator {
-  // ── Sequence number based PRR ─────────────────────────────────────────────
-  // ESP32 kirim seq number 0-255 di byte pertama setiap heartbeat
-  // Flutter track gap untuk deteksi packet loss
-  //
-  // Window: simpan 15 entry terakhir (received=true, lost=false)
-  // PRR = received_count / window_size
-
-  // Circular buffer — key: posisi 0-14, value: true=received false=lost
-  final List<bool> _window = [];
-  int? _lastSeqNum;
-
-  static const int windowSize = AlarmConfig.prrWindowSize; // 15
-
-  // Dipanggil setiap heartbeat notify diterima dari ESP32
-  // value[0] = seq number (0-255)
-  // value[1] = status byte
-  void onPacketReceived(List<int> value) {
-    if (value.isEmpty) return;
-    final int seq = value[0];
-
-    if (_lastSeqNum == null) {
-      // Paket pertama — inisialisasi window
-      _window.add(true);
-      _lastSeqNum = seq;
-      return;
-    }
-
-    // Hitung gap: berapa paket yang harusnya datang antara lastSeq dan seq ini
-    // Handle wrap-around 255→0
-    int gap = (seq - _lastSeqNum! + 256) % 256;
-
-    // Gap 0 = duplikat (abaikan)
-    if (gap == 0) return;
-
-    // Gap sangat besar (>30) → kemungkinan ESP32 restart, reset saja
-    if (gap > 30) {
-      _window.clear();
-      _window.add(true);
-      _lastSeqNum = seq;
-      return;
-    }
-
-    // gap-1 = jumlah paket yang hilang di antara lastSeq dan seq ini
-    final int lost = gap - 1;
-    for (int i = 0; i < lost; i++) {
-      _window.add(false); // paket hilang
-      if (_window.length > windowSize) _window.removeAt(0);
-    }
-
-    // Paket ini sendiri diterima
-    _window.add(true);
-    if (_window.length > windowSize) _window.removeAt(0);
-
-    _lastSeqNum = seq;
-  }
-
-  // PRR = paket diterima / ukuran window
-  // Null jika window belum penuh
-  double? get prr {
-    if (_window.length < windowSize) return null;
-    final int received = _window.where((v) => v).length;
-    return received / windowSize;
-  }
-
-  void reset() {
-    _window.clear();
-    _lastSeqNum = null;
-  }
+  stage1, // Danger ≥1 detik kontinu → 1x getar ringan di HP
+  stage2, // Danger ≥4 detik kontinu → getar terus + popup + notif + buzzer hardware
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
 // SIGNAL PROCESSOR
 // [1] Sliding Window Moving Average — smoothing RSSI
 // [2] Multistage Hysteresis — butuh durasi tertentu di danger sebelum naik stage
-// [3] PRR sebagai indikator kedua — alarm hanya bunyi jika RSSI + PRR terpenuhi
-// [4] Stage 2 lock — stage 2 tidak bisa turun otomatis, hanya via forceReset()
+// [3] Stage 2 lock — stage 2 tidak bisa turun otomatis, hanya via forceReset()
 // ═════════════════════════════════════════════════════════════════════════════
 class _SignalProcessor {
 
@@ -155,12 +76,8 @@ class _SignalProcessor {
   AlertStage get currentStage => _currentStage;
 
   final void Function(AlertStage stage) onStageChanged;
-  final _PrrCalculator prrCalculator;
 
-  _SignalProcessor({
-    required this.onStageChanged,
-    required this.prrCalculator,
-  });
+  _SignalProcessor({required this.onStageChanged});
 
   int? addSample(int rawRssi) {
     _window.add(rawRssi);
@@ -176,7 +93,6 @@ class _SignalProcessor {
     final DeviceDistance distance = rssiToDistance(averageRssi);
     final bool rssiInDanger = distance == DeviceDistance.far ||
                               distance == DeviceDistance.outOfRange;
-    final double? currentPrr = prrCalculator.prr;
 
     if (rssiInDanger) {
       // ── Di zona danger ────────────────────────────────────────────────────
@@ -190,24 +106,12 @@ class _SignalProcessor {
           .difference(_dangerEnteredAt!)
           .inMilliseconds;
 
-      // Cek kondisi PRR — harus warm-up DAN di bawah threshold
-      final bool prrConfirmsStage1 = currentPrr != null &&
-          currentPrr <= AlarmConfig.prrStage1Threshold;
-      final bool prrConfirmsStage2 = currentPrr != null &&
-          currentPrr <= AlarmConfig.prrStage2Threshold;
-
       AlertStage newStage = AlertStage.none;
 
       if (durationMs >= AlarmConfig.stage2ThresholdMs) {
-        if (prrConfirmsStage2) {
-          newStage = AlertStage.stage2;
-        } else if (prrConfirmsStage1) {
-          newStage = AlertStage.stage1;
-        }
+        newStage = AlertStage.stage2;
       } else if (durationMs >= AlarmConfig.stage1ThresholdMs) {
-        if (prrConfirmsStage1) {
-          newStage = AlertStage.stage1;
-        }
+        newStage = AlertStage.stage1;
       }
 
       // Stage hanya boleh naik (none→stage1→stage2)
@@ -275,7 +179,6 @@ class BleDeviceConnection {
   StreamSubscription? _heartbeatSubscription;
   Timer? _rssiTimer;
 
-  late final _PrrCalculator _prrCalculator;
   late final _SignalProcessor _processor;
 
   final _deviceStreamController = StreamController<KidDevice>.broadcast();
@@ -291,10 +194,8 @@ class BleDeviceConnection {
     required KidDevice initialDevice,
     required this.onAlertStageChanged,
   }) : _currentDevice = initialDevice {
-    _prrCalculator = _PrrCalculator();
     _processor = _SignalProcessor(
       onStageChanged: (stage) => onAlertStageChanged(_currentDevice.id, stage),
-      prrCalculator: _prrCalculator,
     );
   }
 
@@ -310,9 +211,10 @@ class BleDeviceConnection {
             if (char.uuid.toString() == BleUuid.statusCharacteristic) {
               _statusCharacteristic = char;
               await _statusCharacteristic!.setNotifyValue(true);
+              // Subscribe notify untuk keepalive koneksi
               _heartbeatSubscription = _statusCharacteristic!
                   .onValueReceived
-                  .listen((value) => _prrCalculator.onPacketReceived(value));
+                  .listen((_) {});
             }
           }
         }
@@ -322,7 +224,6 @@ class BleDeviceConnection {
       _connectionSubscription = bleDevice.connectionState.listen((state) {
         if (state == BluetoothConnectionState.disconnected) {
           _processor.reset();
-          _prrCalculator.reset();
           _updateKidDevice(isConnected: false);
           if (!intentionalDisconnect) {
             // Disconnect tiba-tiba → langsung stage 2
@@ -344,7 +245,6 @@ class BleDeviceConnection {
           } catch (_) {
             // Gagal baca RSSI → kemungkinan disconnect
             _processor.reset();
-            _prrCalculator.reset();
             _updateKidDevice(isConnected: false);
             if (!intentionalDisconnect) {
               onAlertStageChanged(_currentDevice.id, AlertStage.stage2);
@@ -371,7 +271,6 @@ class BleDeviceConnection {
       distance: distance,
       signalStrength: signalStrength,
       rssiAverage: rssi,
-      prrValue: _prrCalculator.prr,
     );
 
     if (!_deviceStreamController.isClosed) {

@@ -690,37 +690,19 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
 
-            // ── Row 2: Signal metrics (RSSI + PRR) ───────────────────
-            if (device.rssiAverage != null || device.prrValue != null) ...[
+            // ── Row 2: RSSI metric ────────────────────────────────────
+            if (device.rssiAverage != null) ...[
               const SizedBox(height: 8),
               Row(
                 children: [
-                  // RSSI chip
-                  if (device.rssiAverage != null) ...[
-                    Expanded(
-                      child: _buildMetricTile(
-                        label: 'RSSI',
-                        value: '${device.rssiAverage} dBm',
-                        icon: Icons.wifi_tethering_rounded,
-                        color: AppColors.textMuted,
-                      ),
+                  Expanded(
+                    child: _buildMetricTile(
+                      label: 'RSSI',
+                      value: '${device.rssiAverage} dBm',
+                      icon: Icons.wifi_tethering_rounded,
+                      color: AppColors.textMuted,
                     ),
-                    const SizedBox(width: 8),
-                  ],
-                  // PRR chip
-                  if (device.prrValue != null)
-                    Expanded(
-                      child: _buildMetricTile(
-                        label: 'PRR',
-                        value: '${(device.prrValue! * 100).toStringAsFixed(0)}%',
-                        icon: Icons.network_check_rounded,
-                        color: device.prrValue! >= 0.8
-                            ? AppColors.accent
-                            : device.prrValue! >= 0.6
-                                ? AppColors.warning
-                                : AppColors.danger,
-                      ),
-                    ),
+                  ),
                 ],
               ),
             ],
@@ -794,7 +776,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // ── Stat Chip ─────────────────────────────────────────────────────────────
-  // ── Metric tile untuk RSSI dan PRR ──────────────────────────────────────
+  // ── Metric tile untuk RSSI ───────────────────────────────────────────────
   Widget _buildMetricTile({
     required String label,
     required String value,
