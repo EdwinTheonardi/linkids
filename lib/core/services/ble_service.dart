@@ -1,28 +1,45 @@
 // lib/core/services/ble_service.dart
 import 'dart:async';
-import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:linkids/core/models/kid_device.dart';
 
 // ═════════════════════════════════════════════════════════════════════════════
 // KONVERSI RSSI → JARAK
-// Input : nilai RSSI rata-rata hasil sliding window (dalam dBm, nilai negatif)
-// Output: enum DeviceDistance
-// Threshold dikalibrasi setelah pengujian lapangan dengan ESP32-C3
 // ═════════════════════════════════════════════════════════════════════════════
 DeviceDistance rssiToDistance(int rssiAverage) {
-  if (rssiAverage >= -60) return DeviceDistance.veryClose; // < ~1m
-  if (rssiAverage >= -75) return DeviceDistance.close;     // ~1–3m
-  if (rssiAverage >= -90) return DeviceDistance.far;        // ~3–8m
-  return DeviceDistance.outOfRange;                         // > ~8m
+  if (rssiAverage >= AlarmConfig.rssiVeryClose) return DeviceDistance.veryClose;
+  if (rssiAverage >= AlarmConfig.rssiClose)     return DeviceDistance.close;
+  if (rssiAverage >= AlarmConfig.rssiFar)       return DeviceDistance.far;
+  return DeviceDistance.outOfRange;
 }
 
-// Normalisasi RSSI ke 0.0–1.0 untuk progress bar sinyal di UI
 double rssiToSignalStrength(int rssi) {
   const int minRssi = -100;
   const int maxRssi = -40;
   return ((rssi - minRssi) / (maxRssi - minRssi)).clamp(0.0, 1.0);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ALARM THRESHOLD CONFIG
+// Semua threshold di satu tempat — ubah di sini setelah uji lapangan
+// ═════════════════════════════════════════════════════════════════════════════
+class AlarmConfig {
+  // ── RSSI Threshold ────────────────────────────────────────────────────────
+  static const int rssiVeryClose = -60; // ≤ ~1m  → safe
+  static const int rssiClose     = -75; // ~1–3m  → caution
+  static const int rssiFar       = -85; // ~3–5m  → danger
+  // < rssiFar = outOfRange → danger
+
+  // ── Hysteresis Threshold ──────────────────────────────────────────────────
+  static const int stage1ThresholdMs = 1000; // 1 detik di danger → Stage 1
+  static const int stage2ThresholdMs = 4000; // 4 detik di danger → Stage 2
+
+  // ── PRR Threshold ─────────────────────────────────────────────────────────
+  // Alarm hanya bunyi jika RSSI danger DAN PRR di bawah threshold
+  static const double prrStage1Threshold = 0.80; // PRR ≤ 80% → boleh naik stage 1
+  static const double prrStage2Threshold = 0.60; // PRR ≤ 60% → boleh naik stage 2
+  static const int    prrWindowSize      = 15;   // 15 × 200ms = 3 detik window
 }
 
 // ── UUID ──────────────────────────────────────────────────────────────────────
@@ -34,150 +51,209 @@ class BleUuid {
 
 // ── Alert Stage ───────────────────────────────────────────────────────────────
 enum AlertStage {
-  none,   // Zona aman/waspada
-  stage1, // Danger ≥1 detik → vibrasi ringan di HP
-  stage2, // Danger ≥2 detik → vibrasi kuat + bunyi HP + buzzer ESP32
+  none,   // Zona safe/caution — tidak ada aksi
+  stage1, // Danger ≥1 detik + PRR terpenuhi → 1x getar ringan di HP
+  stage2, // Danger ≥4 detik + PRR terpenuhi → getar terus + popup + notif + buzzer
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// PRR CALCULATOR
+// Menghitung Packet Reception Rate dari heartbeat notify ESP32 setiap 200ms
+// ═════════════════════════════════════════════════════════════════════════════
+class _PrrCalculator {
+  // ── Sequence number based PRR ─────────────────────────────────────────────
+  // ESP32 kirim seq number 0-255 di byte pertama setiap heartbeat
+  // Flutter track gap untuk deteksi packet loss
+  //
+  // Window: simpan 15 entry terakhir (received=true, lost=false)
+  // PRR = received_count / window_size
+
+  // Circular buffer — key: posisi 0-14, value: true=received false=lost
+  final List<bool> _window = [];
+  int? _lastSeqNum;
+
+  static const int windowSize = AlarmConfig.prrWindowSize; // 15
+
+  // Dipanggil setiap heartbeat notify diterima dari ESP32
+  // value[0] = seq number (0-255)
+  // value[1] = status byte
+  void onPacketReceived(List<int> value) {
+    if (value.isEmpty) return;
+    final int seq = value[0];
+
+    if (_lastSeqNum == null) {
+      // Paket pertama — inisialisasi window
+      _window.add(true);
+      _lastSeqNum = seq;
+      return;
+    }
+
+    // Hitung gap: berapa paket yang harusnya datang antara lastSeq dan seq ini
+    // Handle wrap-around 255→0
+    int gap = (seq - _lastSeqNum! + 256) % 256;
+
+    // Gap 0 = duplikat (abaikan)
+    if (gap == 0) return;
+
+    // Gap sangat besar (>30) → kemungkinan ESP32 restart, reset saja
+    if (gap > 30) {
+      _window.clear();
+      _window.add(true);
+      _lastSeqNum = seq;
+      return;
+    }
+
+    // gap-1 = jumlah paket yang hilang di antara lastSeq dan seq ini
+    final int lost = gap - 1;
+    for (int i = 0; i < lost; i++) {
+      _window.add(false); // paket hilang
+      if (_window.length > windowSize) _window.removeAt(0);
+    }
+
+    // Paket ini sendiri diterima
+    _window.add(true);
+    if (_window.length > windowSize) _window.removeAt(0);
+
+    _lastSeqNum = seq;
+  }
+
+  // PRR = paket diterima / ukuran window
+  // Null jika window belum penuh
+  double? get prr {
+    if (_window.length < windowSize) return null;
+    final int received = _window.where((v) => v).length;
+    return received / windowSize;
+  }
+
+  void reset() {
+    _window.clear();
+    _lastSeqNum = null;
+  }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
 // SIGNAL PROCESSOR
-// Menggabungkan dua mekanisme anti-false-alarm:
-//
-// [1] SLIDING WINDOW MOVING AVERAGE
-//     - ESP32 mengirim BLE packet setiap 100ms
-//     - HP membaca RSSI tiap 100ms dan menyimpannya ke buffer
-//     - Buffer berukuran 10 → merepresentasikan 1 detik data terakhir
-//     - Setiap ada data baru: data terlama dibuang, data baru masuk
-//     - Rata-rata dihitung dari semua data di buffer
-//     - Rata-rata inilah yang dipakai untuk klasifikasi zona
-//     - Efek: lonjakan RSSI sesaat (akibat sinyal menabrak benda) tidak
-//       langsung mengubah zona, karena hanya berkontribusi 1/10 dari average
-//
-//     Contoh (window size = 10):
-//     t=0  buffer: [-55,-57,-56,-58,-54,-56,-57,-55,-56,-57] avg=-56 → safe
-//     t=1  buffer: [-57,-56,-58,-54,-56,-57,-55,-56,-57,-85] avg=-59 → safe
-//     t=2  buffer: [-56,-58,-54,-56,-57,-55,-56,-57,-85,-83] avg=-62 → close
-//     → Butuh beberapa iterasi sebelum rata-rata benar-benar mencerminkan
-//       perubahan jarak, bukan hanya lonjakan sesaat
-//
-// [2] MULTISTAGE TIME-BASED HYSTERESIS
-//     - Rata-rata RSSI masuk zona danger → mulai hitung durasi
-//     - Durasi ≥1 detik kontinu → naik ke Stage 1
-//     - Durasi ≥2 detik kontinu → naik ke Stage 2
-//     - Jika sinyal kembali ke safe/caution sebelum threshold → durasi direset
-//     - Stage tidak bisa turun selama masih di zona danger
-//     - Efek: sinyal yang masuk danger sesaat (<1 detik) tidak trigger alarm
+// [1] Sliding Window Moving Average — smoothing RSSI
+// [2] Multistage Hysteresis — butuh durasi tertentu di danger sebelum naik stage
+// [3] PRR sebagai indikator kedua — alarm hanya bunyi jika RSSI + PRR terpenuhi
+// [4] Stage 2 lock — stage 2 tidak bisa turun otomatis, hanya via forceReset()
 // ═════════════════════════════════════════════════════════════════════════════
 class _SignalProcessor {
 
-  // ── [1] Sliding Window Config ─────────────────────────────────────────────
-  static const int windowSize       = 10; // 10 sampel × 100ms = 1 detik
-  static const int minSamplesNeeded = 5;  // minimum sampel sebelum mulai hitung
+  // ── Config ────────────────────────────────────────────────────────────────
+  static const int windowSize       = 15; // 15 × 200ms = 3 detik
+  static const int minSamplesNeeded = 8;
 
-  // ── [2] Hysteresis Config ─────────────────────────────────────────────────
-  static const int stage1ThresholdMs = 1000; // 1 detik di danger → Stage 1
-  static const int stage2ThresholdMs = 2000; // 2 detik di danger → Stage 2
-
-  // ── Internal State ────────────────────────────────────────────────────────
-  final List<int> _window = []; // buffer sliding window, maks windowSize item
-  DateTime? _dangerEnteredAt;   // waktu pertama kali masuk zona danger
+  // ── State ─────────────────────────────────────────────────────────────────
+  final List<int> _window = [];
+  DateTime? _dangerEnteredAt;
   AlertStage _currentStage = AlertStage.none;
+
+  // Flag: stage 2 hanya bisa turun via forceReset(), tidak otomatis
+  bool _isStage2Locked = false;
 
   AlertStage get currentStage => _currentStage;
 
   final void Function(AlertStage stage) onStageChanged;
-  _SignalProcessor({required this.onStageChanged});
+  final _PrrCalculator prrCalculator;
 
-  // ── Proses satu sampel RSSI baru ─────────────────────────────────────────
-  // Dipanggil setiap 100ms oleh polling timer di BleDeviceConnection
-  // Mengembalikan RSSI rata-rata (null = buffer belum cukup)
+  _SignalProcessor({
+    required this.onStageChanged,
+    required this.prrCalculator,
+  });
+
   int? addSample(int rawRssi) {
-
-    // ── LANGKAH 1: Masukkan sampel baru ke ujung kanan window ──────────────
     _window.add(rawRssi);
+    if (_window.length > windowSize) _window.removeAt(0);
+    if (_window.length < minSamplesNeeded) return null;
 
-    // ── LANGKAH 2: Buang sampel terlama (ujung kiri) jika window penuh ─────
-    // Inilah mekanisme "sliding" — window selalu berisi N data TERBARU
-    if (_window.length > windowSize) {
-      _window.removeAt(0); // hapus data paling lama
-    }
-
-    // ── LANGKAH 3: Hitung rata-rata jika sampel sudah cukup ────────────────
-    if (_window.length < minSamplesNeeded) {
-      return null; // tunggu sampel lebih banyak sebelum mulai klasifikasi
-    }
-
-    // Moving average = jumlah semua nilai di window / jumlah item
-    final int sum = _window.reduce((a, b) => a + b);
-    final int average = sum ~/ _window.length;
-
-    // ── LANGKAH 4: Klasifikasi zona dari rata-rata ──────────────────────────
-    // Penting: klasifikasi pakai RATA-RATA, bukan raw RSSI
+    final int average = _window.reduce((a, b) => a + b) ~/ _window.length;
     _runHysteresis(average);
-
     return average;
   }
 
-  // ── Jalankan mekanisme hysteresis berdasarkan rata-rata RSSI ─────────────
   void _runHysteresis(int averageRssi) {
     final DeviceDistance distance = rssiToDistance(averageRssi);
+    final bool rssiInDanger = distance == DeviceDistance.far ||
+                              distance == DeviceDistance.outOfRange;
+    final double? currentPrr = prrCalculator.prr;
 
-    // Tentukan apakah saat ini di zona danger
-    final bool inDanger = distance == DeviceDistance.far ||
-                          distance == DeviceDistance.outOfRange;
+    if (rssiInDanger) {
+      // ── Di zona danger ────────────────────────────────────────────────────
 
-    if (inDanger) {
-      // ── MASUK / BERTAHAN DI ZONA DANGER ──────────────────────────────────
+      // Jika stage 2 sudah locked, tidak perlu proses lebih lanjut
+      // Stage 2 sudah aktif dan hanya bisa di-reset via forceReset()
+      if (_isStage2Locked) return;
 
-      // Catat waktu pertama kali masuk danger (hanya sekali, tidak di-reset
-      // selama masih terus di danger)
       _dangerEnteredAt ??= DateTime.now();
-
-      // Hitung berapa lama sudah berada di zona danger secara kontinu
       final int durationMs = DateTime.now()
           .difference(_dangerEnteredAt!)
           .inMilliseconds;
 
-      // Tentukan stage berdasarkan durasi
-      AlertStage newStage;
-      if (durationMs >= stage2ThresholdMs) {
-        // ≥2 detik kontinu di danger → Stage 2
-        newStage = AlertStage.stage2;
-      } else if (durationMs >= stage1ThresholdMs) {
-        // ≥1 detik kontinu di danger → Stage 1
-        newStage = AlertStage.stage1;
-      } else {
-        // Belum cukup durasi → belum ada peringatan
-        newStage = AlertStage.none;
+      // Cek kondisi PRR — harus warm-up DAN di bawah threshold
+      final bool prrConfirmsStage1 = currentPrr != null &&
+          currentPrr <= AlarmConfig.prrStage1Threshold;
+      final bool prrConfirmsStage2 = currentPrr != null &&
+          currentPrr <= AlarmConfig.prrStage2Threshold;
+
+      AlertStage newStage = AlertStage.none;
+
+      if (durationMs >= AlarmConfig.stage2ThresholdMs) {
+        if (prrConfirmsStage2) {
+          newStage = AlertStage.stage2;
+        } else if (prrConfirmsStage1) {
+          newStage = AlertStage.stage1;
+        }
+      } else if (durationMs >= AlarmConfig.stage1ThresholdMs) {
+        if (prrConfirmsStage1) {
+          newStage = AlertStage.stage1;
+        }
       }
 
-      // Stage hanya boleh naik (none→stage1→stage2), tidak boleh turun
-      // selama masih di zona danger
-      // Ini mencegah flapping stage saat RSSI berfluktuasi di batas threshold
+      // Stage hanya boleh naik (none→stage1→stage2)
       if (newStage.index > _currentStage.index) {
         _currentStage = newStage;
+        if (_currentStage == AlertStage.stage2) {
+          _isStage2Locked = true; // kunci stage 2 — hanya turun via forceReset()
+        }
         onStageChanged(_currentStage);
       }
 
     } else {
-      // ── KELUAR DARI ZONA DANGER (kembali ke safe/caution) ─────────────────
+      // ── Kembali ke zona aman ──────────────────────────────────────────────
 
-      // Reset semua state hysteresis
+      // Reset timer danger
       _dangerEnteredAt = null;
 
-      // Emit none hanya jika sebelumnya ada stage aktif
-      // (tidak perlu emit none berulang-ulang saat memang sudah none)
-      if (_currentStage != AlertStage.none) {
+      // Stage 2 locked → tidak emit none otomatis
+      // Hanya forceReset() yang bisa menurunkan stage 2
+      if (_isStage2Locked) return;
+
+      // Stage 1 bisa turun otomatis ke none
+      if (_currentStage == AlertStage.stage1) {
         _currentStage = AlertStage.none;
         onStageChanged(AlertStage.none);
       }
     }
   }
 
-  // Reset semua state — dipanggil saat device disconnect
+  // Dipanggil saat user tap Dismiss di popup
+  // Reset semua state sehingga stage bisa naik lagi dari nol
+  void forceReset() {
+    _window.clear();
+    _dangerEnteredAt = null;
+    _isStage2Locked = false;
+    if (_currentStage != AlertStage.none) {
+      _currentStage = AlertStage.none;
+      onStageChanged(AlertStage.none);
+    }
+  }
+
+  // Dipanggil saat device disconnect
   void reset() {
     _window.clear();
     _dangerEnteredAt = null;
+    _isStage2Locked = false;
     if (_currentStage != AlertStage.none) {
       _currentStage = AlertStage.none;
       onStageChanged(AlertStage.none);
@@ -187,21 +263,19 @@ class _SignalProcessor {
 
 // ═════════════════════════════════════════════════════════════════════════════
 // BLE DEVICE CONNECTION
-// Merepresentasikan satu koneksi aktif ke satu ESP32-C3
-// Tugasnya:
-//   - Poll RSSI setiap 100ms
-//   - Feed RSSI ke _SignalProcessor
-//   - Update KidDevice state dan emit ke stream
-//   - Kirim perintah alarm ke ESP32 via BLE write
+// Satu instance per device yang terhubung
 // ═════════════════════════════════════════════════════════════════════════════
 class BleDeviceConnection {
   final BluetoothDevice bleDevice;
   bool intentionalDisconnect = false;
 
   BluetoothCharacteristic? _alarmCharacteristic;
+  BluetoothCharacteristic? _statusCharacteristic;
   StreamSubscription? _connectionSubscription;
+  StreamSubscription? _heartbeatSubscription;
   Timer? _rssiTimer;
 
+  late final _PrrCalculator _prrCalculator;
   late final _SignalProcessor _processor;
 
   final _deviceStreamController = StreamController<KidDevice>.broadcast();
@@ -217,16 +291,15 @@ class BleDeviceConnection {
     required KidDevice initialDevice,
     required this.onAlertStageChanged,
   }) : _currentDevice = initialDevice {
+    _prrCalculator = _PrrCalculator();
     _processor = _SignalProcessor(
-      onStageChanged: (stage) {
-        onAlertStageChanged(_currentDevice.id, stage);
-      },
+      onStageChanged: (stage) => onAlertStageChanged(_currentDevice.id, stage),
+      prrCalculator: _prrCalculator,
     );
   }
 
   Future<void> initialize() async {
     try {
-      // Discover service dan characteristic di ESP32
       final services = await bleDevice.discoverServices();
       for (final service in services) {
         if (service.uuid.toString() == BleUuid.service) {
@@ -234,48 +307,44 @@ class BleDeviceConnection {
             if (char.uuid.toString() == BleUuid.alarmCharacteristic) {
               _alarmCharacteristic = char;
             }
+            if (char.uuid.toString() == BleUuid.statusCharacteristic) {
+              _statusCharacteristic = char;
+              await _statusCharacteristic!.setNotifyValue(true);
+              _heartbeatSubscription = _statusCharacteristic!
+                  .onValueReceived
+                  .listen((value) => _prrCalculator.onPacketReceived(value));
+            }
           }
         }
       }
 
-      // Deteksi disconnect dari sisi hardware
+      // Deteksi disconnect hardware
       _connectionSubscription = bleDevice.connectionState.listen((state) {
         if (state == BluetoothConnectionState.disconnected) {
-          // Reset processor agar tidak ada sisa state dari koneksi sebelumnya
           _processor.reset();
+          _prrCalculator.reset();
           _updateKidDevice(isConnected: false);
-          // Hanya trigger stage 2 jika disconnect tidak disengaja
-          // (bukan karena user remove device dari app)
           if (!intentionalDisconnect) {
+            // Disconnect tiba-tiba → langsung stage 2
             onAlertStageChanged(_currentDevice.id, AlertStage.stage2);
           }
         }
       });
 
-      // ── Polling RSSI setiap 100ms ─────────────────────────────────────────
-      // Inilah sumber data untuk sliding window
-      // readRssi() mengukur kekuatan sinyal yang DITERIMA HP dari ESP32
+      // Polling RSSI setiap 200ms
       _rssiTimer = Timer.periodic(
-        const Duration(milliseconds: 100),
+        const Duration(milliseconds: 200),
         (_) async {
           try {
             final int rawRssi = await bleDevice.readRssi();
-
-            // Feed raw RSSI ke SignalProcessor
-            // Processor akan:
-            //   1. Tambahkan ke sliding window
-            //   2. Hitung moving average
-            //   3. Jalankan hysteresis
-            //   4. Emit stage jika berubah
             final int? averageRssi = _processor.addSample(rawRssi);
-
-            // Update UI hanya jika average sudah tersedia (buffer cukup)
             if (averageRssi != null) {
               _updateKidDevice(rssi: averageRssi);
             }
           } catch (_) {
-            // readRssi gagal biasanya karena device sudah disconnect
+            // Gagal baca RSSI → kemungkinan disconnect
             _processor.reset();
+            _prrCalculator.reset();
             _updateKidDevice(isConnected: false);
             if (!intentionalDisconnect) {
               onAlertStageChanged(_currentDevice.id, AlertStage.stage2);
@@ -284,16 +353,14 @@ class BleDeviceConnection {
         },
       );
     } catch (e) {
-      // ignore: avoid_print
       print('[BLE] initialize error: $e');
     }
   }
 
-  // Update state KidDevice dan emit ke stream (untuk update UI)
   void _updateKidDevice({int? rssi, bool? isConnected}) {
     final bool connected = isConnected ?? true;
     final DeviceDistance distance = (rssi != null && connected)
-        ? rssiToDistance(rssi)   // gunakan rata-rata RSSI dari sliding window
+        ? rssiToDistance(rssi)
         : DeviceDistance.outOfRange;
     final double signalStrength = (rssi != null && connected)
         ? rssiToSignalStrength(rssi)
@@ -303,7 +370,8 @@ class BleDeviceConnection {
       isConnected: connected,
       distance: distance,
       signalStrength: signalStrength,
-      rssiAverage: rssi, // DEBUG: simpan nilai average untuk ditampilkan di UI
+      rssiAverage: rssi,
+      prrValue: _prrCalculator.prr,
     );
 
     if (!_deviceStreamController.isClosed) {
@@ -311,14 +379,19 @@ class BleDeviceConnection {
     }
   }
 
-  // ── Kirim perintah alarm ke ESP32 via BLE write ───────────────────────────
+  // Dipanggil saat user dismiss popup stage 2
+  // Reset processor sehingga stage bisa naik lagi dari nol
+  // TIDAK mematikan hardware buzzer — itu lewat tombol terpisah di card
+  void dismissStage2() {
+    _processor.forceReset();
+  }
+
   Future<void> triggerAlarm() async => _writeAlarm(true);
-  Future<void> stopAlarm() async    => _writeAlarm(false);
+  Future<void> stopAlarm()    async => _writeAlarm(false);
 
   Future<void> _writeAlarm(bool active) async {
     if (_alarmCharacteristic == null) return;
     try {
-      // 0x01 = nyalakan buzzer, 0x00 = matikan buzzer
       await _alarmCharacteristic!.write(
         [active ? 0x01 : 0x00],
         withoutResponse: false,
@@ -328,24 +401,25 @@ class BleDeviceConnection {
         _deviceStreamController.add(_currentDevice);
       }
     } catch (e) {
-      // ignore: avoid_print
       print('[BLE] write alarm error: $e');
     }
   }
 
   Future<void> dispose() async {
+    intentionalDisconnect = true;
     _rssiTimer?.cancel();
+    _heartbeatSubscription?.cancel();
+    _connectionSubscription?.cancel();
     _processor.reset();
-    await _connectionSubscription?.cancel();
-    await _deviceStreamController.close();
+    if (!_deviceStreamController.isClosed) {
+      await _deviceStreamController.close();
+    }
     try { await bleDevice.disconnect(); } catch (_) {}
   }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
 // BLE SERVICE — SINGLETON
-// Entry point utama yang dipakai oleh UI
-// Mengelola semua BleDeviceConnection yang aktif
 // ═════════════════════════════════════════════════════════════════════════════
 class BleService {
   BleService._();
@@ -353,18 +427,15 @@ class BleService {
 
   final Map<String, BleDeviceConnection> _connections = {};
 
-  // Stream untuk update list device di HomeScreen
   final _devicesController    = StreamController<List<KidDevice>>.broadcast();
-  // Stream untuk trigger vibrasi + dialog di HomeScreen
   final _alertStageController = StreamController<(String, AlertStage)>.broadcast();
 
-  Stream<List<KidDevice>>        get devicesStream    => _devicesController.stream;
-  Stream<(String, AlertStage)>   get alertStageStream => _alertStageController.stream;
+  Stream<List<KidDevice>>      get devicesStream    => _devicesController.stream;
+  Stream<(String, AlertStage)> get alertStageStream => _alertStageController.stream;
 
   List<KidDevice> get allDevices =>
       _connections.values.map((c) => c.currentDevice).toList();
 
-  // ── Request Permission ────────────────────────────────────────────────────
   Future<bool> requestPermissions() async {
     final statuses = await [
       Permission.bluetoothScan,
@@ -374,14 +445,11 @@ class BleService {
     return statuses.values.every((s) => s.isGranted);
   }
 
-  // ── Scan ──────────────────────────────────────────────────────────────────
   Stream<List<ScanResult>> startScan({
     Duration timeout = const Duration(seconds: 10),
   }) {
     FlutterBluePlus.startScan(
       timeout: timeout,
-      // Filter pakai Service UUID — lebih reliable dari nama/keyword
-      // Device yang advertise UUID ini dipastikan firmware Linkids
       withServices: [Guid(BleUuid.service)],
     );
     return FlutterBluePlus.scanResults;
@@ -390,15 +458,13 @@ class BleService {
   Future<void> stopScan() => FlutterBluePlus.stopScan();
   Stream<bool> get isScanningStream => FlutterBluePlus.isScanning;
 
-  // ── Connect ke device ─────────────────────────────────────────────────────
   Future<KidDevice?> connectDevice({
     required ScanResult scanResult,
     required String kidName,
   }) async {
     final BluetoothDevice bleDevice = scanResult.device;
-    final String id = bleDevice.remoteId.str; // MAC address sebagai ID unik
+    final String id = bleDevice.remoteId.str;
 
-    // Cegah double connect ke device yang sama
     if (_connections.containsKey(id)) return _connections[id]!.currentDevice;
 
     try {
@@ -421,22 +487,17 @@ class BleService {
       await connection.initialize();
       _connections[id] = connection;
 
-      // Setiap update dari device ini → emit seluruh list ke HomeScreen
       connection.deviceStream.listen((_) => _emitAllDevices());
       _emitAllDevices();
 
       return connection.currentDevice;
     } catch (e) {
-      // ignore: avoid_print
       print('[BLE] connect error: $e');
       return null;
     }
   }
 
-  // ── Dipanggil oleh _SignalProcessor via BleDeviceConnection ──────────────
-  // Saat stage berubah: emit ke HomeScreen + aksi otomatis ke hardware
   void _onAlertStageChanged(String deviceId, AlertStage stage) {
-    // Emit ke HomeScreen untuk trigger vibrasi + dialog
     if (!_alertStageController.isClosed) {
       _alertStageController.add((deviceId, stage));
     }
@@ -444,27 +505,33 @@ class BleService {
     final BleDeviceConnection? conn = _connections[deviceId];
     if (conn == null) return;
 
+    // Stage 2 → nyalakan buzzer hardware otomatis
     if (stage == AlertStage.stage2) {
-      // Stage 2 → aktifkan buzzer ESP32 secara otomatis via BLE write
       conn.triggerAlarm();
-    } else if (stage == AlertStage.none) {
-      // Kembali aman → matikan buzzer jika sedang aktif karena auto-trigger
-      if (conn.currentDevice.isAlarmActive) {
-        conn.stopAlarm();
-      }
     }
+    // Stage 1 dan none → tidak ada aksi ke hardware
+    // Hardware buzzer hanya dimatikan via tombol di card
 
     _emitAllDevices();
   }
 
-  // ── Disconnect & hapus device ─────────────────────────────────────────────
+  // Dipanggil saat user dismiss popup stage 2
+  // Reset processor agar stage bisa naik lagi dari nol jika masih dalam bahaya
+  // TIDAK mematikan hardware buzzer
+  void dismissStage2(String deviceId) {
+    _connections[deviceId]?.dismissStage2();
+    _emitAllDevices();
+  }
+
   Future<void> disconnectDevice(String id) async {
     final conn = _connections.remove(id);
-    await conn?.dispose();
+    if (conn != null) {
+      conn.intentionalDisconnect = true;
+      await conn.dispose();
+    }
     _emitAllDevices();
   }
 
-  // ── Alarm manual dari tombol di UI ───────────────────────────────────────
   Future<void> triggerAlarm(String id) async {
     await _connections[id]?.triggerAlarm();
     _emitAllDevices();
@@ -475,14 +542,12 @@ class BleService {
     _emitAllDevices();
   }
 
-  // ── Emit seluruh list KidDevice terbaru ke HomeScreen ────────────────────
   void _emitAllDevices() {
     if (!_devicesController.isClosed) {
       _devicesController.add(allDevices);
     }
   }
 
-  // Panggil saat app ditutup
   Future<void> disposeAll() async {
     for (final conn in _connections.values) {
       await conn.dispose();

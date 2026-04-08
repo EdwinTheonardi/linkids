@@ -58,6 +58,9 @@ AlarmZone zoneFromDistance(DeviceDistance distance) {
   }
 }
 
+// Sentinel object untuk membedakan "tidak di-pass" vs "di-pass null" di copyWith
+const _sentinel = Object();
+
 // ── Model KidDevice ───────────────────────────────────────────────────────────
 class KidDevice {
   final String id;             // MAC address ESP32-C3
@@ -67,6 +70,7 @@ class KidDevice {
   final double signalStrength; // 0.0 – 1.0 (dari RSSI)
   final bool isAlarmActive;
   final int? rssiAverage;      // DEBUG: nilai RSSI average dari sliding window
+  final double? prrValue;      // DEBUG: nilai PRR saat ini (0.0–1.0)
 
   const KidDevice({
     required this.id,
@@ -75,7 +79,8 @@ class KidDevice {
     required this.distance,
     required this.signalStrength,
     this.isAlarmActive = false,
-    this.rssiAverage,           // DEBUG: null jika belum ada data
+    this.rssiAverage,
+    this.prrValue,
   });
 
   AlarmZone get zone =>
@@ -87,7 +92,8 @@ class KidDevice {
     DeviceDistance? distance,
     double? signalStrength,
     bool? isAlarmActive,
-    int? rssiAverage,
+    Object? rssiAverage = _sentinel,  // pakai sentinel agar bisa update ke null
+    Object? prrValue    = _sentinel,  // pakai sentinel agar bisa update ke null
   }) {
     return KidDevice(
       id: id,
@@ -96,7 +102,8 @@ class KidDevice {
       distance: distance ?? this.distance,
       signalStrength: signalStrength ?? this.signalStrength,
       isAlarmActive: isAlarmActive ?? this.isAlarmActive,
-      rssiAverage: rssiAverage ?? this.rssiAverage,
+      rssiAverage: rssiAverage == _sentinel ? this.rssiAverage : rssiAverage as int?,
+      prrValue:    prrValue    == _sentinel ? this.prrValue    : prrValue    as double?,
     );
   }
 }

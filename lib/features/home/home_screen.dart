@@ -1,5 +1,6 @@
 // lib/features/home/home_screen.dart
 import 'dart:async';
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:linkids/core/constants/app_colors.dart';
 import 'package:linkids/core/models/kid_device.dart';
@@ -23,7 +24,16 @@ class _HomeScreenState extends State<HomeScreen> {
   StreamSubscription? _devicesSubscription;
   StreamSubscription? _alertSubscription;
   final ScrollController _scrollController = ScrollController();
-  final Set<String> _acknowledgedDangerIds = {};
+
+  // Track stage aktif per device
+  final Map<String, AlertStage> _deviceStages = {};
+
+  // Timer untuk continuous vibration saat stage2
+  Timer? _vibrationTimer;
+  final AudioPlayer _audioPlayer = AudioPlayer();
+
+  // Flag untuk mencegah double dialog
+  bool _dangerDialogShowing = false;
 
   int get safeCount    => devices.where((d) => d.zone == AlarmZone.safe).length;
   int get cautionCount => devices.where((d) => d.zone == AlarmZone.caution).length;
@@ -48,9 +58,6 @@ class _HomeScreenState extends State<HomeScreen> {
     _devicesSubscription = _ble.devicesStream.listen((updatedDevices) {
       if (!mounted) return;
       setState(() => devices = updatedDevices);
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _checkAndShowDangerDialog();
-      });
     });
 
     // Listen ke alert stage — trigger vibrasi dan dialog sesuai stage
@@ -69,6 +76,8 @@ class _HomeScreenState extends State<HomeScreen> {
   void dispose() {
     _devicesSubscription?.cancel();
     _alertSubscription?.cancel();
+    _vibrationTimer?.cancel();
+    _audioPlayer.dispose();
     _scrollController.dispose();
     super.dispose();
   }
@@ -84,44 +93,77 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _removeDevice(KidDevice device) async {
     await _ble.disconnectDevice(device.id);
-    _acknowledgedDangerIds.remove(device.id);
+    _deviceStages.remove(device.id);
     BackgroundService.instance.clearDeviceStage(device.id);
-  }
-
-  // ── Danger Dialog ─────────────────────────────────────────────────────────
-  void _checkAndShowDangerDialog() {
-    final newDangerDevices = devices.where(
-      (d) => d.zone == AlarmZone.danger && !_acknowledgedDangerIds.contains(d.id),
-    ).toList();
-
-    if (newDangerDevices.isEmpty) return;
-
-    for (final d in newDangerDevices) {
-      _acknowledgedDangerIds.add(d.id);
+    // Stop vibration jika tidak ada lagi device yang stage2
+    if (!_deviceStages.values.any((s) => s == AlertStage.stage2)) {
+      _stopVibration();
+      _stopAlarmSound();
     }
-
-    _showDangerDialog(newDangerDevices);
   }
 
-  void _showDangerDialog(List<KidDevice> dangerDevices) {
+  // ── Vibration control ────────────────────────────────────────────────────
+  void _startContinuousVibration() {
+    _vibrationTimer?.cancel();
+    _vibrationTimer = Timer.periodic(
+      const Duration(milliseconds: 600),
+      (_) {
+        if (mounted) HapticFeedback.heavyImpact();
+      },
+    );
+  }
+
+  void _stopVibration() {
+    _vibrationTimer?.cancel();
+    _vibrationTimer = null;
+  }
+
+  Future<void> _startAlarmSound() async {
+    await _audioPlayer.setReleaseMode(ReleaseMode.loop);
+    await _audioPlayer.play(AssetSource('sounds/alarm.mp3'));
+  }
+
+  Future<void> _stopAlarmSound() async {
+    await _audioPlayer.stop();
+  }
+
+  // ── Danger Dialog — hanya untuk stage 2 ──────────────────────────────────
+  void _showDangerDialog(KidDevice device) {
+    if (_dangerDialogShowing) return; // tidak tampilkan jika sudah ada dialog
+    _dangerDialogShowing = true;
+
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => _DangerAlertDialog(
-        dangerDevices: dangerDevices,
-        onSeeDevice: (device) {
+        dangerDevices: [device],
+        onSeeDevice: (d) {
           Navigator.of(ctx).pop();
-          _scrollToDevice(device);
-          // Hapus alarm notification saat user tap "Lihat Device"
-          BackgroundService.instance.dismissAlarmNotification();
+          _dangerDialogShowing = false;
+          _scrollToDevice(d);
+          _onDismissStage2(d.id);
         },
         onDismiss: () {
           Navigator.of(ctx).pop();
-          // Hapus alarm notification saat user tap "Dismiss"
-          BackgroundService.instance.dismissAlarmNotification();
+          _dangerDialogShowing = false;
+          _onDismissStage2(device.id);
         },
       ),
     );
+  }
+
+  // Dipanggil saat user dismiss dialog stage 2
+  void _onDismissStage2(String deviceId) {
+    // Stop vibration, suara alarm, dan notifikasi di HP
+    _stopVibration();
+    _stopAlarmSound();
+    BackgroundService.instance.dismissAlarmNotification();
+
+    // Force reset stage2 ke none di BleService
+    // Jika masih di danger zone, akan naik lagi ke stage1 setelah 1 detik
+    // lalu ke stage2 setelah 3 detik lagi (no cooldown — by design)
+    _ble.dismissStage2(deviceId);
+    _deviceStages[deviceId] = AlertStage.none;
   }
 
   void _scrollToDevice(KidDevice device) {
@@ -137,35 +179,44 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // ── Handle alert stage dari BleService ──────────────────────────────────
   void _handleAlertStage(String deviceId, AlertStage stage) {
-    // Cari device yang trigger alarm
-    final device = devices.firstWhere(
-      (d) => d.id == deviceId,
-      orElse: () => devices.first,
-    );
+    if (!mounted) return;
 
-    // Kirim info ke background service untuk update notifikasi
-    BackgroundService.instance.notifyAlarmStage(stage, device.name, device.id);
+    // Cari device yang trigger
+    final deviceList = devices.where((d) => d.id == deviceId).toList();
+    if (deviceList.isEmpty) return;
+    final device = deviceList.first;
+
+    // Simpan stage terbaru device ini
+    _deviceStages[deviceId] = stage;
 
     switch (stage) {
       case AlertStage.stage1:
-        // Stage 1: vibrasi ringan di HP
+        // Stage 1: getar ringan 1x saja
+        // Tidak ada popup, tidak ada notifikasi, tidak ada buzzer hardware
         HapticFeedback.lightImpact();
-        // Reset acknowledged agar danger dialog muncul lagi
-        _acknowledgedDangerIds.remove(deviceId);
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          _checkAndShowDangerDialog();
-        });
         break;
 
       case AlertStage.stage2:
-        // Stage 2: vibrasi kuat 3x
-        HapticFeedback.heavyImpact();
-        Future.delayed(const Duration(milliseconds: 300), () => HapticFeedback.heavyImpact());
-        Future.delayed(const Duration(milliseconds: 600), () => HapticFeedback.heavyImpact());
+        // Stage 2: getar terus menerus + suara alarm + popup + notifikasi
+        _startContinuousVibration();
+        _startAlarmSound();
+        // Kirim notifikasi ke background service
+        BackgroundService.instance.notifyAlarmStage(stage, device.name, deviceId);
+        // Tampilkan danger dialog
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _showDangerDialog(device);
+        });
         break;
 
       case AlertStage.none:
-        // Kembali aman — notifikasi sudah di-clear oleh BackgroundService
+        // Kembali aman dari stage1 (otomatis)
+        // Stage2 tidak akan sampai ke sini karena sudah di-lock
+        // Hanya stop vibration jika tidak ada stage2 lain yang aktif
+        if (!_deviceStages.values.any((s) => s == AlertStage.stage2)) {
+          _stopVibration();
+          _stopAlarmSound();
+          BackgroundService.instance.notifyAlarmStage(stage, device.name, deviceId);
+        }
         break;
     }
   }
@@ -620,7 +671,7 @@ class _HomeScreenState extends State<HomeScreen> {
             const Divider(height: 1, color: Color(0xFFEEF2F7)),
             const SizedBox(height: 14),
 
-            // ── Middle: Chips ─────────────────────────────────────────
+            // ── Row 1: Status chips ───────────────────────────────────
             Row(
               children: [
                 _buildStatChip(
@@ -636,18 +687,43 @@ class _HomeScreenState extends State<HomeScreen> {
                   label: device.distance.label,
                   color: zone.color,
                 ),
-                // ── DEBUG: tampilkan nilai RSSI average ──────────────────
-                if (device.rssiAverage != null) ...[
-                  const SizedBox(width: 10),
-                  _buildStatChip(
-                    icon: Icons.analytics_outlined,
-                    label: "RSSI: ${device.rssiAverage} dBm",
-                    color: AppColors.textMuted,
-                  ),
-                ],
-                // ── END DEBUG ─────────────────────────────────────────────
               ],
             ),
+
+            // ── Row 2: Signal metrics (RSSI + PRR) ───────────────────
+            if (device.rssiAverage != null || device.prrValue != null) ...[
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  // RSSI chip
+                  if (device.rssiAverage != null) ...[
+                    Expanded(
+                      child: _buildMetricTile(
+                        label: 'RSSI',
+                        value: '${device.rssiAverage} dBm',
+                        icon: Icons.wifi_tethering_rounded,
+                        color: AppColors.textMuted,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
+                  // PRR chip
+                  if (device.prrValue != null)
+                    Expanded(
+                      child: _buildMetricTile(
+                        label: 'PRR',
+                        value: '${(device.prrValue! * 100).toStringAsFixed(0)}%',
+                        icon: Icons.network_check_rounded,
+                        color: device.prrValue! >= 0.8
+                            ? AppColors.accent
+                            : device.prrValue! >= 0.6
+                                ? AppColors.warning
+                                : AppColors.danger,
+                      ),
+                    ),
+                ],
+              ),
+            ],
 
             // ── Bottom: Alarm Buttons ─────────────────────────────────
             if (device.isConnected) ...[
@@ -718,6 +794,47 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // ── Stat Chip ─────────────────────────────────────────────────────────────
+  // ── Metric tile untuk RSSI dan PRR ──────────────────────────────────────
+  Widget _buildMetricTile({
+    required String label,
+    required String value,
+    required IconData icon,
+    required Color color,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.07),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withOpacity(0.25)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 13, color: color),
+          const SizedBox(width: 5),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w500,
+              color: color.withOpacity(0.8),
+            ),
+          ),
+          const Spacer(),
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              color: color,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildStatChip({
     required IconData icon,
     required String label,
