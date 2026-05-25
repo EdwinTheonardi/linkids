@@ -25,14 +25,11 @@ class _HomeScreenState extends State<HomeScreen> {
   StreamSubscription? _alertSubscription;
   final ScrollController _scrollController = ScrollController();
 
-  // Track stage aktif per device
   final Map<String, AlertStage> _deviceStages = {};
 
-  // Timer untuk continuous vibration saat stage2
   Timer? _vibrationTimer;
   final AudioPlayer _audioPlayer = AudioPlayer();
 
-  // Flag untuk mencegah double dialog
   bool _dangerDialogShowing = false;
 
   int get safeCount    => devices.where((d) => d.zone == AlarmZone.safe).length;
@@ -52,24 +49,24 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _init() async {
-
-    // Listen ke stream device dari BleService
-    // Setiap ada update RSSI atau status, UI otomatis rebuild
     _devicesSubscription = _ble.devicesStream.listen((updatedDevices) {
       if (!mounted) return;
       setState(() => devices = updatedDevices);
     });
 
-    // Listen ke alert stage — trigger vibrasi dan dialog sesuai stage
     _alertSubscription = _ble.alertStageStream.listen((event) {
       final (deviceId, stage) = event;
       if (!mounted) return;
       _handleAlertStage(deviceId, stage);
     });
 
-    // Request permission notifikasi (Android 13+) lalu start foreground service
     await BackgroundService.instance.requestPermissions();
     BackgroundService.instance.start();
+
+    // ── Restore saved devices dari storage ────────────────────────────────
+    // Card akan langsung muncul sebagai "Disconnected", lalu reconnect
+    // otomatis di background jika gelang dalam jangkauan
+    await _ble.restoreDevices();
   }
 
   @override
@@ -95,14 +92,164 @@ class _HomeScreenState extends State<HomeScreen> {
     await _ble.disconnectDevice(device.id);
     _deviceStages.remove(device.id);
     BackgroundService.instance.clearDeviceStage(device.id);
-    // Stop vibration jika tidak ada lagi device yang stage2
     if (!_deviceStages.values.any((s) => s == AlertStage.stage2)) {
       _stopVibration();
       _stopAlarmSound();
     }
   }
 
-  // ── Vibration control ────────────────────────────────────────────────────
+  // ── Rename dialog ─────────────────────────────────────────────────────────
+  void _showRenameDialog(KidDevice device) {
+    final controller = TextEditingController(text: device.name);
+    final formKey = GlobalKey<FormState>();
+
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+        backgroundColor: AppColors.white,
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 56, height: 56,
+                decoration: BoxDecoration(
+                  color: AppColors.primary.withOpacity(0.10),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.edit_rounded,
+                    size: 26, color: AppColors.primary),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                "Rename Device",
+                style: TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w800,
+                  color: AppColors.textDark,
+                  letterSpacing: -0.4,
+                ),
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                "Enter a name for this device",
+                style: TextStyle(
+                  fontSize: 13,
+                  color: AppColors.textMuted,
+                ),
+              ),
+              const SizedBox(height: 20),
+              Form(
+                key: formKey,
+                child: TextFormField(
+                  controller: controller,
+                  autofocus: true,
+                  textCapitalization: TextCapitalization.words,
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.textDark,
+                  ),
+                  decoration: InputDecoration(
+                    hintText: "e.g. Anak 1, Budi...",
+                    hintStyle: TextStyle(
+                      color: AppColors.textMuted.withOpacity(0.6),
+                      fontWeight: FontWeight.w400,
+                    ),
+                    filled: true,
+                    fillColor: AppColors.background,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide.none,
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: const BorderSide(
+                          color: AppColors.primary, width: 1.5),
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 13),
+                  ),
+                  validator: (v) {
+                    if (v == null || v.trim().isEmpty) {
+                      return 'Name cannot be empty';
+                    }
+                    if (v.trim().length > 30) {
+                      return 'Max 30 characters';
+                    }
+                    return null;
+                  },
+                  onFieldSubmitted: (_) => _submitRename(
+                      ctx, device, controller, formKey),
+                ),
+              ),
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () =>
+                      _submitRename(ctx, device, controller, formKey),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.primary,
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    textStyle: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: -0.2,
+                    ),
+                  ),
+                  child: const Text("Save"),
+                ),
+              ),
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton(
+                  onPressed: () => Navigator.of(ctx).pop(),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.textMuted,
+                    side: BorderSide(
+                        color: AppColors.textMuted.withOpacity(0.3)),
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    textStyle: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: -0.2,
+                    ),
+                  ),
+                  child: const Text("Cancel"),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _submitRename(
+    BuildContext ctx,
+    KidDevice device,
+    TextEditingController controller,
+    GlobalKey<FormState> formKey,
+  ) {
+    if (!formKey.currentState!.validate()) return;
+    final newName = controller.text.trim();
+    Navigator.of(ctx).pop();
+    _ble.renameDevice(device.id, newName);
+  }
+
+  // ── Vibration control ─────────────────────────────────────────────────────
   void _startContinuousVibration() {
     _vibrationTimer?.cancel();
     _vibrationTimer = Timer.periodic(
@@ -127,9 +274,9 @@ class _HomeScreenState extends State<HomeScreen> {
     await _audioPlayer.stop();
   }
 
-  // ── Danger Dialog — hanya untuk stage 2 ──────────────────────────────────
+  // ── Danger Dialog ─────────────────────────────────────────────────────────
   void _showDangerDialog(KidDevice device) {
-    if (_dangerDialogShowing) return; // tidak tampilkan jika sudah ada dialog
+    if (_dangerDialogShowing) return;
     _dangerDialogShowing = true;
 
     showDialog(
@@ -152,16 +299,10 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // Dipanggil saat user dismiss dialog stage 2
   void _onDismissStage2(String deviceId) {
-    // Stop vibration, suara alarm, dan notifikasi di HP
     _stopVibration();
     _stopAlarmSound();
     BackgroundService.instance.dismissAlarmNotification();
-
-    // Force reset stage2 ke none di BleService
-    // Jika masih di danger zone, akan naik lagi ke stage1 setelah 1 detik
-    // lalu ke stage2 setelah 3 detik lagi (no cooldown — by design)
     _ble.dismissStage2(deviceId);
     _deviceStages[deviceId] = AlertStage.none;
   }
@@ -177,41 +318,30 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ── Handle alert stage dari BleService ──────────────────────────────────
   void _handleAlertStage(String deviceId, AlertStage stage) {
     if (!mounted) return;
 
-    // Cari device yang trigger
     final deviceList = devices.where((d) => d.id == deviceId).toList();
     if (deviceList.isEmpty) return;
     final device = deviceList.first;
 
-    // Simpan stage terbaru device ini
     _deviceStages[deviceId] = stage;
 
     switch (stage) {
       case AlertStage.stage1:
-        // Stage 1: getar ringan 1x saja
-        // Tidak ada popup, tidak ada notifikasi, tidak ada buzzer hardware
         HapticFeedback.lightImpact();
         break;
 
       case AlertStage.stage2:
-        // Stage 2: getar terus menerus + suara alarm + popup + notifikasi
         _startContinuousVibration();
         _startAlarmSound();
-        // Kirim notifikasi ke background service
         BackgroundService.instance.notifyAlarmStage(stage, device.name, deviceId);
-        // Tampilkan danger dialog
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) _showDangerDialog(device);
         });
         break;
 
       case AlertStage.none:
-        // Kembali aman dari stage1 (otomatis)
-        // Stage2 tidak akan sampai ke sini karena sudah di-lock
-        // Hanya stop vibration jika tidak ada stage2 lain yang aktif
         if (!_deviceStages.values.any((s) => s == AlertStage.stage2)) {
           _stopVibration();
           _stopAlarmSound();
@@ -365,13 +495,9 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () async {
-          // AddDeviceScreen mengembalikan KidDevice jika connect berhasil
-          // BleService sudah menyimpan koneksinya — HomeScreen cukup listen devicesStream
           await Navigator.of(context).push(
             MaterialPageRoute(builder: (_) => const AddDeviceScreen()),
           );
-          // Tidak perlu setState di sini —
-          // devicesStream dari BleService akan otomatis emit KidDevice baru
         },
         backgroundColor: AppColors.primary,
         foregroundColor: Colors.white,
@@ -390,29 +516,12 @@ class _HomeScreenState extends State<HomeScreen> {
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
         Image.asset("assets/images/logo-horizontal.png", width: 90),
-        Container(
-          width: 40, height: 40,
-          decoration: BoxDecoration(
-            color: AppColors.white,
-            borderRadius: BorderRadius.circular(12),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.08),
-                blurRadius: 8,
-                offset: const Offset(0, 2),
-              ),
-            ],
-          ),
-          child: const Icon(Icons.notifications_none_rounded,
-              color: AppColors.primary, size: 22),
-        ),
       ],
     );
   }
 
   // ── Summary Banner ────────────────────────────────────────────────────────
   Widget _buildSummaryBanner() {
-    // Jika belum ada device, tampilkan banner netral
     if (devices.isEmpty) {
       return Container(
         width: double.infinity,
@@ -630,8 +739,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    // ── Rename button — sekarang sudah berfungsi ─────────
                     OutlinedButton(
-                      onPressed: () { /* TODO: dialog rename */ },
+                      onPressed: () => _showRenameDialog(device),
                       style: OutlinedButton.styleFrom(
                         minimumSize: const Size(68, 30),
                         foregroundColor: AppColors.primary,
@@ -775,8 +885,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ── Stat Chip ─────────────────────────────────────────────────────────────
-  // ── Metric tile untuk RSSI ───────────────────────────────────────────────
   Widget _buildMetricTile({
     required String label,
     required String value,
@@ -846,7 +954,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ── Empty State ───────────────────────────────────────────────────────────
   Widget _buildEmptyState() {
     return Center(
       child: Column(
