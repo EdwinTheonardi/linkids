@@ -1,31 +1,8 @@
-// lib/core/services/background_service.dart
-//
-// Dua lapis notifikasi:
-//   1. Foreground service notification — selalu ada, tapi LOW priority
-//      (tidak muncul di heads-up, tidak ada suara, hanya di drawer)
-//   2. Alarm notification — muncul saat bahaya, HIGH priority, tidak bisa diswipe
-//      (ini yang pop-up dari atas dan persistent)
-//
-// pubspec.yaml:
-//   flutter_foreground_task: ^8.0.0
-//   flutter_local_notifications: ^17.0.0
-//
-// AndroidManifest.xml (dalam <manifest>):
-//   <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-//   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
-//   <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-//
-// AndroidManifest.xml (dalam <application>):
-//   <service
-//     android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
-//     android:foregroundServiceType="connectedDevice"
-//     android:exported="false" />
-
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:linkids/core/services/ble_service.dart';
 
-// ── Background Task Handler ───────────────────────────────────────────────────
+// Background Task Handler
 @pragma('vm:entry-point')
 void startCallback() {
   FlutterForegroundTask.setTaskHandler(_LinkidsTaskHandler());
@@ -42,7 +19,7 @@ class _LinkidsTaskHandler extends TaskHandler {
   Future<void> onDestroy(DateTime timestamp) async {}
 }
 
-// ── BackgroundService ─────────────────────────────────────────────────────────
+// BackgroundService
 class BackgroundService {
   BackgroundService._();
   static final BackgroundService instance = BackgroundService._();
@@ -57,17 +34,15 @@ class BackgroundService {
 
   // Channel ID
   static const String _foregroundChannelId = 'linkids_bg';
-  static const String _alarmChannelId      = 'linkids_alarm';
-  static const int    _alarmNotificationId  = 9999;
+  static const String _alarmChannelId = 'linkids_alarm';
+  static const int _alarmNotificationId = 9999;
 
   // Track stage per device
   final Map<String, AlertStage> _deviceStages = {};
 
-  // ── Initialize ────────────────────────────────────────────────────────────
+  // Initialize
   Future<void> initialize() async {
-    // ── Setup flutter_foreground_task ────────────────────────────────────────
-    // LOW priority → tidak muncul sebagai heads-up, tidak ada suara
-    // Hanya ada di notification drawer sebagai indikator app berjalan
+    // Setup flutter_foreground_task
     FlutterForegroundTask.init(
       androidNotificationOptions: AndroidNotificationOptions(
         channelId: _foregroundChannelId,
@@ -77,7 +52,8 @@ class BackgroundService {
         priority: NotificationPriority.LOW,
       ),
       iosNotificationOptions: const IOSNotificationOptions(
-        showNotification: false, // iOS: sembunyikan notifikasi foreground service
+        showNotification:
+            false, // iOS: sembunyikan notifikasi foreground service
         playSound: false,
       ),
       foregroundTaskOptions: ForegroundTaskOptions(
@@ -88,7 +64,7 @@ class BackgroundService {
       ),
     );
 
-    // ── Setup flutter_local_notifications ────────────────────────────────────
+    // Setup flutter_local_notifications
     const AndroidInitializationSettings androidSettings =
         AndroidInitializationSettings('@mipmap/ic_launcher');
 
@@ -96,7 +72,7 @@ class BackgroundService {
       const InitializationSettings(android: androidSettings),
     );
 
-    // Channel untuk notifikasi background persistent (LOW — tidak bunyi)
+    // Channel untuk notifikasi background persistent (LOW - tidak bunyi)
     const AndroidNotificationChannel bgChannel = AndroidNotificationChannel(
       'linkids_bg_persistent',
       'Linkids Background',
@@ -106,7 +82,7 @@ class BackgroundService {
       enableVibration: false,
     );
 
-    // Channel untuk alarm (MAX — pop-up dari atas)
+    // Channel untuk alarm (MAX - pop-up dari atas)
     const AndroidNotificationChannel alarmChannel = AndroidNotificationChannel(
       _alarmChannelId,
       'Linkids Alarm',
@@ -117,20 +93,22 @@ class BackgroundService {
       enableLights: true,
     );
 
-    final androidPlugin = _localNotifications
-        .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>();
+    final androidPlugin =
+        _localNotifications
+            .resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin
+            >();
 
     await androidPlugin?.createNotificationChannel(bgChannel);
     await androidPlugin?.createNotificationChannel(alarmChannel);
   }
 
-  // ── Request permission ────────────────────────────────────────────────────
+  // Request permission
   Future<void> requestPermissions() async {
     await FlutterForegroundTask.requestNotificationPermission();
   }
 
-  // ── Start foreground service ──────────────────────────────────────────────
+  // Start foreground service
   Future<void> start() async {
     if (_isRunning) return;
     await FlutterForegroundTask.startService(
@@ -143,11 +121,10 @@ class BackgroundService {
     _isRunning = true;
 
     // Tampilkan notifikasi background persistent via flutter_local_notifications
-    // Ini yang tidak bisa diswipe bahkan di MIUI
     await _showBackgroundNotification();
   }
 
-  // ── Stop foreground service ───────────────────────────────────────────────
+  // Stop foreground service
   Future<void> stop() async {
     await FlutterForegroundTask.stopService();
     await _dismissAlarmNotification();
@@ -156,39 +133,39 @@ class BackgroundService {
     _deviceStages.clear();
   }
 
-  // ── Dipanggil dari HomeScreen saat stage berubah ──────────────────────────
+  // Dipanggil dari HomeScreen saat stage berubah
   Future<void> notifyAlarmStage(
-      AlertStage stage, String deviceName, String deviceId) async {
+    AlertStage stage,
+    String deviceName,
+    String deviceId,
+  ) async {
     _deviceStages[deviceId] = stage;
 
     final worstStage = _getWorstActiveStage();
 
     if (worstStage == AlertStage.stage2) {
-      // Stage 2 — tampilkan notifikasi popup urgent
-      // Notifikasi TIDAK hilang otomatis meski zona kembali aman
-      // Hanya hilang saat user dismiss dialog di dalam app
+      // Stage 2 - tampilkan notifikasi popup urgent
       await _showAlarmNotification(
         title: '🚨 DANGER — $deviceName',
         body: 'Your child is outside the safe zone! Open the app now.',
       );
     }
-    // Stage 1 dan none — tidak ada perubahan pada notifikasi
-    // Notifikasi yang sudah muncul tetap ada sampai user dismiss manual
+    // Stage 1 dan none - tidak ada perubahan pada notifikasi
   }
 
-  // ── Hapus stage device saat device di-remove ──────────────────────────────
+  // Hapus stage device saat device di-remove
   void clearDeviceStage(String deviceId) {
     _deviceStages.remove(deviceId);
   }
 
-  // ── Dismiss alarm notification — dipanggil saat user dismiss dialog ───────
+  // Dismiss alarm notification - dipanggil saat user dismiss dialog
   Future<void> dismissAlarmNotification() async {
     await _dismissAlarmNotification();
     // Reset semua stage ke none karena user sudah acknowledge
     _deviceStages.updateAll((key, value) => AlertStage.none);
   }
 
-  // ── Tampilkan alarm notification (persistent, tidak bisa diswipe) ─────────
+  // Tampilkan alarm notification (persistent, tidak bisa diswipe)
   Future<void> _showAlarmNotification({
     required String title,
     required String body,
@@ -206,9 +183,9 @@ class BackgroundService {
           channelDescription: 'Linkids danger alert notification',
           importance: Importance.max,
           priority: Priority.max,
-          ongoing: true,           // ← tidak bisa diswipe
-          autoCancel: false,       // ← tidak hilang saat di-tap
-          fullScreenIntent: true,  // ← tampil bahkan saat layar terkunci
+          ongoing: true, // ← tidak bisa diswipe
+          autoCancel: false, // ← tidak hilang saat di-tap
+          fullScreenIntent: true, // ← tampil bahkan saat layar terkunci
           playSound: true,
           enableVibration: true,
           ticker: title,
@@ -225,7 +202,7 @@ class BackgroundService {
     );
   }
 
-  // ── Tampilkan notifikasi background persistent (ganti foreground service notif) ──
+  // Tampilkan notifikasi background persistent (ganti foreground service notif)
   Future<void> _showBackgroundNotification() async {
     await _localNotifications.show(
       1001,
@@ -238,7 +215,7 @@ class BackgroundService {
           channelDescription: 'Indicates Linkids is running in the background',
           importance: Importance.low,
           priority: Priority.low,
-          ongoing: true,       // ← tidak bisa diswipe
+          ongoing: true, // ← tidak bisa diswipe
           autoCancel: false,
           playSound: false,
           enableVibration: false,
@@ -248,19 +225,19 @@ class BackgroundService {
     );
   }
 
-  // ── Hapus notifikasi background ───────────────────────────────────────────
+  // Hapus notifikasi background
   Future<void> _hideBackgroundNotification() async {
     await _localNotifications.cancel(1001);
   }
 
-  // ── Hapus alarm notification ──────────────────────────────────────────────
+  // Hapus alarm notification
   Future<void> _dismissAlarmNotification() async {
     if (!_alarmNotificationShowing) return;
     await _localNotifications.cancel(_alarmNotificationId);
     _alarmNotificationShowing = false;
   }
 
-  // ── Cari stage terburuk dari semua device ────────────────────────────────
+  // Cari stage terburuk dari semua device
   AlertStage _getWorstActiveStage() {
     if (_deviceStages.values.any((s) => s == AlertStage.stage2)) {
       return AlertStage.stage2;

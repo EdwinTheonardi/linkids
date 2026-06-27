@@ -1,13 +1,10 @@
-// lib/core/services/ble_service.dart
 import 'dart:async';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:linkids/core/models/kid_device.dart';
 import 'package:linkids/core/services/device_repository.dart';
 
-// ═════════════════════════════════════════════════════════════════════════════
-// KONVERSI RSSI → JARAK
-// ═════════════════════════════════════════════════════════════════════════════
+// Konversi RSSI ke Zona
 DeviceDistance rssiToDistance(int rssiAverage) {
   if (rssiAverage >= AlarmConfig.rssiVeryClose) return DeviceDistance.veryClose;
   if (rssiAverage >= AlarmConfig.rssiClose) return DeviceDistance.close;
@@ -21,9 +18,7 @@ double rssiToSignalStrength(int rssi) {
   return ((rssi - minRssi) / (maxRssi - minRssi)).clamp(0.0, 1.0);
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// ALARM THRESHOLD CONFIG
-// ═════════════════════════════════════════════════════════════════════════════
+// Konfigurasi Alarm Treshold
 class AlarmConfig {
   static const int rssiVeryClose = -60;
   static const int rssiClose = -75;
@@ -36,7 +31,7 @@ class AlarmConfig {
   static const int reconnectIntervalSec = 15;
 }
 
-// ── UUID ──────────────────────────────────────────────────────────────────────
+// UUID
 class BleUuid {
   static const String service = '06afa479-0127-4b87-b1eb-bfa3006b8eac';
   static const String alarmCharacteristic =
@@ -45,12 +40,10 @@ class BleUuid {
       'f5c2f358-9362-4c86-b248-48049225dfa4';
 }
 
-// ── Alert Stage ───────────────────────────────────────────────────────────────
+// Alert Stage
 enum AlertStage { none, stage1, stage2 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// SIGNAL PROCESSOR
-// ═════════════════════════════════════════════════════════════════════════════
+// SIgnal Processor
 class _SignalProcessor {
   static const int windowSize = 15;
   static const int minSamplesNeeded = 8;
@@ -120,8 +113,7 @@ class _SignalProcessor {
     }
   }
 
-  // Reset internal state tanpa emit event —
-  // dipakai saat disconnect agar window lama tidak ikut terbawa ke sesi baru
+  // Reset internal state tanpa emit event
   void reset() {
     _window.clear();
     _dangerEnteredAt = null;
@@ -130,17 +122,12 @@ class _SignalProcessor {
   }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// BLE DEVICE CONNECTION
-// ═════════════════════════════════════════════════════════════════════════════
+// BLE Device Connection
 class BleDeviceConnection {
   final BluetoothDevice bleDevice;
 
-  // true  → disconnect disengaja (user remove / app close)
-  //         tidak trigger alarm, tidak auto-reconnect
-  // false → disconnect tidak disengaja (sinyal putus, baterai habis)
-  //         trigger alarm stage2, mulai auto-reconnect loop
   bool intentionalDisconnect = false;
+  // true = disengaja (no alarm, no reconnect), false = tidak disengaja (alarm + reconnect)
 
   BluetoothCharacteristic? _alarmCharacteristic;
   BluetoothCharacteristic? _statusCharacteristic;
@@ -148,7 +135,7 @@ class BleDeviceConnection {
   StreamSubscription? _heartbeatSubscription;
   Timer? _rssiTimer;
 
-  // ── Auto-reconnect ────────────────────────────────────────────────────────
+  // Auto-reconnect
   Timer? _reconnectTimer;
   bool _isReconnecting = false;
 
@@ -162,7 +149,7 @@ class BleDeviceConnection {
 
   final void Function(String deviceId, AlertStage stage) onAlertStageChanged;
 
-  // Callback ke BleService — BleService yang handle scan & connect
+  // Callback ke BleService - BleService yang handle scan & connect
   final Future<bool> Function(BleDeviceConnection conn) onRequestReconnect;
 
   BleDeviceConnection({
@@ -207,7 +194,7 @@ class BleDeviceConnection {
     }
   }
 
-  // ── Handle disconnect ────────────────────────────────────────────────────
+  // Handle disconnect
   void _handleDisconnect() {
     _stopRssiPolling();
     _processor.reset();
@@ -222,19 +209,9 @@ class BleDeviceConnection {
     _startReconnectLoop();
   }
 
-  // ── Auto-reconnect loop ──────────────────────────────────────────────────
-  //
-  // Loop berjalan terus di background selama:
-  //   - intentionalDisconnect == false
-  //   - device belum kembali connected
-  //
-  // Loop berhenti otomatis saat:
-  //   [A] onReconnectSuccess() dipanggil → connected kembali
-  //   [B] dispose() dipanggil → user remove device atau app close
+  // Auto-reconnect loop
   void _startReconnectLoop() {
     if (_reconnectTimer != null) return; // sudah ada loop, skip
-
-    print('[BLE] reconnect loop started for ${_currentDevice.id}');
 
     _reconnectTimer = Timer.periodic(
       Duration(seconds: AlarmConfig.reconnectIntervalSec),
@@ -266,35 +243,22 @@ class BleDeviceConnection {
     _reconnectTimer = null;
   }
 
-  // ── Restart reconnect loop — dipanggil saat Bluetooth HP dinyalakan ulang ─
-  //
-  // Saat BT dimatikan lalu dinyalakan ulang, reconnect loop yang sebelumnya
-  // berjalan sudah berhenti karena scan gagal. Fungsi ini memulai loop baru.
+  // Restart reconnect loop - dipanggil saat Bluetooth HP dinyalakan ulang
   void restartReconnectLoop() {
     if (intentionalDisconnect) return;
     if (_currentDevice.isConnected) return;
     if (_reconnectTimer != null) return; // sudah ada loop, skip
 
-    print(
-      '[BLE] restarting reconnect loop for ${_currentDevice.id} after BT on',
-    );
     _startReconnectLoop();
   }
 
-  // ── Pause reconnect loop — dipanggil saat Bluetooth HP dimatikan ──────────
-  //
-  // Tidak ada gunanya scan saat BT mati — pause dulu, nanti restart
-  // saat BT dinyalakan kembali via restartReconnectLoop().
+  // Pause reconnect loop - dipanggil saat Bluetooth HP dimatikan
   void pauseReconnectLoop() {
-    print('[BLE] pausing reconnect loop for ${_currentDevice.id} — BT off');
     _stopReconnectLoop();
     _isReconnecting = false;
   }
 
-  // ── Dipanggil BleService setelah reconnect berhasil ─────────────────────
-  //
-  // Re-wire semua BLE subscription yang sudah invalid setelah koneksi putus.
-  // Alarm stage2 TIDAK di-reset di sini — user tetap harus tap Dismiss.
+  // Dipanggil BleService setelah reconnect berhasil
   Future<void> onReconnectSuccess() async {
     _stopReconnectLoop();
     _isReconnecting = false;
@@ -330,16 +294,13 @@ class BleDeviceConnection {
 
       _updateKidDevice(isConnected: true);
       _startRssiPolling();
-
-      print('[BLE] re-initialized after reconnect for ${_currentDevice.id}');
     } catch (e) {
-      print('[BLE] re-initialize error: $e');
       // Gagal re-init → anggap disconnect lagi → loop akan coba reconnect lagi
       _handleDisconnect();
     }
   }
 
-  // ── RSSI polling ─────────────────────────────────────────────────────────
+  // RSSI polling
   void _startRssiPolling() {
     _stopRssiPolling();
     _rssiTimer = Timer.periodic(const Duration(milliseconds: 200), (_) async {
@@ -350,7 +311,7 @@ class BleDeviceConnection {
           _updateKidDevice(rssi: averageRssi);
         }
       } catch (_) {
-        // Gagal baca RSSI — connectionState listener yang akan handle disconnect
+        // Gagal baca RSSI - connectionState listener yang akan handle disconnect
       }
     });
   }
@@ -417,11 +378,9 @@ class BleDeviceConnection {
   }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// BLE SERVICE — SINGLETON
-// ═════════════════════════════════════════════════════════════════════════════
+// BLE SERVICE - SINGLETON
 class BleService {
-  // ── Constructor — langsung pasang Bluetooth state listener ────────────────
+  // Constructor - langsung pasang Bluetooth state listener
   BleService._() {
     _listenBluetoothState();
   }
@@ -430,8 +389,7 @@ class BleService {
   final Map<String, BleDeviceConnection> _connections = {};
   final Map<String, String> _pendingDevices = {};
 
-  // ── Bluetooth state subscription ──────────────────────────────────────────
-  // Dipakai untuk mendeteksi saat Bluetooth HP dimatikan lalu dinyalakan ulang
+  // Bluetooth state subscription
   StreamSubscription? _bluetoothStateSubscription;
 
   final _devicesController = StreamController<List<KidDevice>>.broadcast();
@@ -461,26 +419,18 @@ class BleService {
     return [...connected, ...pending];
   }
 
-  // ── Listener state Bluetooth HP ──────────────────────────────────────────
-  //
-  // Mendeteksi dua kondisi:
-  //   [ON]  → Bluetooth baru dinyalakan ulang setelah dimatikan
-  //           Semua reconnect loop yang berhenti karena BT mati perlu distart ulang
-  //   [OFF] → Bluetooth dimatikan
-  //           Pause semua reconnect loop — tidak ada gunanya scan saat BT mati
+  // Listener state Bluetooth HP
   void _listenBluetoothState() {
     _bluetoothStateSubscription = FlutterBluePlus.adapterState.listen((state) {
       if (state == BluetoothAdapterState.on) {
-        print('[BLE] Bluetooth turned ON — trigger reconnect for all devices');
         _onBluetoothTurnedOn();
       } else if (state == BluetoothAdapterState.off) {
-        print('[BLE] Bluetooth turned OFF — pausing all reconnect loops');
         _onBluetoothTurnedOff();
       }
     });
   }
 
-  // ── Handler: Bluetooth dinyalakan ulang ──────────────────────────────────
+  // Handler: Bluetooth dinyalakan ulang
   Future<void> _onBluetoothTurnedOn() async {
     // Tunggu sebentar agar Bluetooth adapter stabil sebelum mulai scan
     await Future.delayed(const Duration(seconds: 2));
@@ -499,23 +449,20 @@ class BleService {
       final notYetConnected =
           pendingIds.where((id) => !_connections.containsKey(id)).toSet();
       if (notYetConnected.isNotEmpty) {
-        print(
-          '[BLE] autoReconnectAll for ${notYetConnected.length} pending device(s)',
-        );
         _autoReconnectAll(notYetConnected);
       }
     }
   }
 
-  // ── Handler: Bluetooth dimatikan ─────────────────────────────────────────
+  // Handler: Bluetooth dimatikan
   void _onBluetoothTurnedOff() {
-    // Pause semua reconnect loop — BT mati, scan tidak akan berhasil
+    // Pause semua reconnect loop - BT mati, scan tidak akan berhasil
     for (final conn in _connections.values) {
       conn.pauseReconnectLoop();
     }
   }
 
-  // ── Restore saved devices saat app dibuka ────────────────────────────────
+  // Restore saved devices saat app dibuka
   Future<void> restoreDevices() async {
     final saved = await DeviceRepository.instance.loadAll();
     if (saved.isEmpty) return;
@@ -561,10 +508,7 @@ class BleService {
     scanSub.cancel();
   }
 
-  // ── Reconnect satu device — dipanggil dari _reconnectTimer tiap device ───
-  //
-  // Scan singkat untuk cari MAC address spesifik, lalu connect.
-  // Return true jika berhasil, false jika tidak ketemu / gagal connect.
+  // Reconnect satu device - dipanggil dari _reconnectTimer tiap device
   Future<bool> _performReconnect(BleDeviceConnection conn) async {
     final mac = conn.currentDevice.id;
 
@@ -603,7 +547,6 @@ class BleService {
     }
 
     if (targetResult == null) {
-      print('[BLE] device $mac not found in scan');
       return false;
     }
 
@@ -614,12 +557,11 @@ class BleService {
       _emitAllDevices();
       return true;
     } catch (e) {
-      print('[BLE] reconnect connect/init error for $mac: $e');
       return false;
     }
   }
 
-  // ── Helper: connect + buat BleDeviceConnection + daftarkan ───────────────
+  // Helper: connect + buat BleDeviceConnection + daftarkan
   Future<void> _connectAndRegister({
     required ScanResult scanResult,
     required String deviceName,
@@ -679,7 +621,7 @@ class BleService {
   Future<void> stopScan() => FlutterBluePlus.stopScan();
   Stream<bool> get isScanningStream => FlutterBluePlus.isScanning;
 
-  // ── Connect device baru dari AddDeviceScreen ──────────────────────────────
+  // Connect device baru dari AddDeviceScreen
   Future<KidDevice?> connectDevice({
     required ScanResult scanResult,
     required String kidName,

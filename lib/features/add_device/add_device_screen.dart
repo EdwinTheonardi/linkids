@@ -1,4 +1,3 @@
-// lib/features/add_device/add_device_screen.dart
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
@@ -61,7 +60,7 @@ class _AddDeviceScreenState extends State<AddDeviceScreen>
     super.dispose();
   }
 
-  // ── Scan ─────────────────────────────────────────────────────────────────
+  // Scan
   Future<void> _startScan() async {
     // Minta permission dulu sebelum scan
     final granted = await _ble.requestPermissions();
@@ -90,7 +89,7 @@ class _AddDeviceScreenState extends State<AddDeviceScreen>
     _scanSubscription?.cancel();
   }
 
-  // ── Dialog konfirmasi connect ─────────────────────────────────────────────
+  // Dialog konfirmasi connect
   void _showConnectDialog(ScanResult scanResult) {
     final deviceName = _getDeviceName(scanResult);
 
@@ -225,7 +224,7 @@ class _AddDeviceScreenState extends State<AddDeviceScreen>
     );
   }
 
-  // ── Connect ke device via BleService ─────────────────────────────────────
+  // Connect ke device via BleService
   Future<void> _connectToDevice(ScanResult scanResult, String name) async {
     setState(() => _isConnecting = true);
 
@@ -250,7 +249,7 @@ class _AddDeviceScreenState extends State<AddDeviceScreen>
     }
   }
 
-  // ── Build ─────────────────────────────────────────────────────────────────
+  // Build
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -304,7 +303,7 @@ class _AddDeviceScreenState extends State<AddDeviceScreen>
             ),
           ),
 
-          // ── Loading overlay saat connecting ──────────────────────────
+          // Loading overlay saat connecting
           if (_isConnecting)
             Container(
               color: Colors.black.withOpacity(0.4),
@@ -331,7 +330,7 @@ class _AddDeviceScreenState extends State<AddDeviceScreen>
     );
   }
 
-  // ── Header ────────────────────────────────────────────────────────────────
+  // Header
   Widget _buildHeader() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(8, 16, 20, 0),
@@ -357,7 +356,7 @@ class _AddDeviceScreenState extends State<AddDeviceScreen>
     );
   }
 
-  // ── Scan Area ─────────────────────────────────────────────────────────────
+  // Scan Area
   Widget _buildScanArea() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 28, 20, 0),
@@ -486,7 +485,7 @@ class _AddDeviceScreenState extends State<AddDeviceScreen>
     );
   }
 
-  // ── Idle state ────────────────────────────────────────────────────────────
+  // Idle state
   Widget _buildIdleState() {
     return Center(
       child: Column(
@@ -514,7 +513,7 @@ class _AddDeviceScreenState extends State<AddDeviceScreen>
     );
   }
 
-  // ── Skeleton loader saat scanning ─────────────────────────────────────────
+  // Skeleton loader saat scanning
   Widget _buildScanningPlaceholder() {
     return ListView.separated(
       padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -569,7 +568,7 @@ class _AddDeviceScreenState extends State<AddDeviceScreen>
     );
   }
 
-  // ── Device list ───────────────────────────────────────────────────────────
+  // Device list
   Widget _buildDeviceList() {
     return ListView.separated(
       padding: const EdgeInsets.fromLTRB(20, 0, 20, 32),
@@ -581,10 +580,6 @@ class _AddDeviceScreenState extends State<AddDeviceScreen>
   }
 
   // Ambil nama device dari semua sumber yang tersedia
-  // flutter_blue_plus punya 3 sumber nama, dicek berurutan:
-  //   1. advertisementData.localName  → nama dari scan response firmware
-  //   2. device.platformName          → nama yang di-cache Android
-  //   3. Generate dari MAC address    → "Linkids-xx" (2 digit terakhir MAC)
   String _getDeviceName(ScanResult scanResult) {
     if (scanResult.advertisementData.localName.isNotEmpty) {
       return scanResult.advertisementData.localName;
@@ -593,7 +588,6 @@ class _AddDeviceScreenState extends State<AddDeviceScreen>
       return scanResult.device.platformName;
     }
     // Fallback: generate nama dari 2 byte terakhir MAC address
-    // Contoh: MAC "AA:BB:CC:DD:EE:01" → "Linkids-EE01"
     final mac = scanResult.device.remoteId.str;
     final parts = mac.split(':');
     if (parts.length >= 2) {

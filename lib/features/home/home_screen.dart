@@ -1,4 +1,3 @@
-// lib/features/home/home_screen.dart
 import 'dart:async';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
@@ -63,9 +62,7 @@ class _HomeScreenState extends State<HomeScreen> {
     await BackgroundService.instance.requestPermissions();
     BackgroundService.instance.start();
 
-    // ── Restore saved devices dari storage ────────────────────────────────
-    // Card akan langsung muncul sebagai "Disconnected", lalu reconnect
-    // otomatis di background jika gelang dalam jangkauan
+    // Restore saved devices dari storage
     await _ble.restoreDevices();
   }
 
@@ -79,7 +76,7 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
-  // ── Aksi Alarm ────────────────────────────────────────────────────────────
+  // Aksi Alarm
   Future<void> _stopAlarm(KidDevice device) async {
     await _ble.stopAlarm(device.id);
   }
@@ -98,7 +95,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // ── Rename dialog ─────────────────────────────────────────────────────────
+  // Rename dialog
   void _showRenameDialog(KidDevice device) {
     final controller = TextEditingController(text: device.name);
     final formKey = GlobalKey<FormState>();
@@ -249,7 +246,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _ble.renameDevice(device.id, newName);
   }
 
-  // ── Vibration control ─────────────────────────────────────────────────────
+  // Vibration control
   void _startContinuousVibration() {
     _vibrationTimer?.cancel();
     _vibrationTimer = Timer.periodic(
@@ -274,7 +271,7 @@ class _HomeScreenState extends State<HomeScreen> {
     await _audioPlayer.stop();
   }
 
-  // ── Danger Dialog ─────────────────────────────────────────────────────────
+  // Danger Dialog
   void _showDangerDialog(KidDevice device) {
     if (_dangerDialogShowing) return;
     _dangerDialogShowing = true;
@@ -351,7 +348,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // ── Dialog konfirmasi remove ──────────────────────────────────────────────
+  // Dialog konfirmasi remove
   void _confirmRemoveDevice(KidDevice device) {
     showDialog(
       context: context,
@@ -510,7 +507,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ── Header ────────────────────────────────────────────────────────────────
+  // Header
   Widget _buildHeader() {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -520,7 +517,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ── Summary Banner ────────────────────────────────────────────────────────
+  // Summary Banner
   Widget _buildSummaryBanner() {
     if (devices.isEmpty) {
       return Container(
@@ -592,7 +589,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ── Section Title ─────────────────────────────────────────────────────────
+  // Section Title
   Widget _buildSectionTitle() {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -618,7 +615,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ── Kid Card ──────────────────────────────────────────────────────────────
+  // Kid Card
   Widget _buildKidCard(KidDevice device) {
     final zone = device.zone;
     final Border? cardBorder = zone == AlarmZone.safe
@@ -642,7 +639,7 @@ class _HomeScreenState extends State<HomeScreen> {
         padding: const EdgeInsets.all(18),
         child: Column(
           children: [
-            // ── Top: Avatar + Name + Buttons ──────────────────────────
+            // Top: Avatar + Name + Buttons
             Row(
               children: [
                 Stack(
@@ -739,7 +736,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // ── Rename button — sekarang sudah berfungsi ─────────
+                    // Rename button - sekarang sudah berfungsi
                     OutlinedButton(
                       onPressed: () => _showRenameDialog(device),
                       style: OutlinedButton.styleFrom(
@@ -781,7 +778,7 @@ class _HomeScreenState extends State<HomeScreen> {
             const Divider(height: 1, color: Color(0xFFEEF2F7)),
             const SizedBox(height: 14),
 
-            // ── Row 1: Status chips ───────────────────────────────────
+            // Row 1: Status chips
             Row(
               children: [
                 _buildStatChip(
@@ -800,7 +797,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
 
-            // ── Row 2: RSSI metric ────────────────────────────────────
+            // Row 2: RSSI metric
             if (device.rssiAverage != null) ...[
               const SizedBox(height: 8),
               Row(
@@ -817,7 +814,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ],
 
-            // ── Bottom: Alarm Buttons ─────────────────────────────────
+            // Bottom: Alarm Buttons
             if (device.isConnected) ...[
               const SizedBox(height: 14),
               const Divider(height: 1, color: Color(0xFFEEF2F7)),
@@ -986,7 +983,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-// ── Danger Alert Dialog ───────────────────────────────────────────────────────
+// Danger Alert Dialog
 class _DangerAlertDialog extends StatelessWidget {
   final List<KidDevice> dangerDevices;
   final void Function(KidDevice device) onSeeDevice;
